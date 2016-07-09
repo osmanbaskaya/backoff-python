@@ -9,142 +9,8 @@ potential for intermittent failures i.e. network resources and external
 APIs. Somewhat more generally, it may also be of use for dynamically
 polling resources for externally generated content.
 
-## Examples
-
-*Since Kenneth Reitz's [requests](http://python-requests.org) module
-has become a defacto standard for HTTP clients in python, networking
-examples below are written using it, but it is in no way required by
-the backoff module.*
-
-### @backoff.on_exception
-
-The `on_exception` decorator is used to retry when a specified exception
-is raised. Here's an example using exponential backoff when any
-`requests` exception is raised:
-
-    @backoff.on_exception(backoff.expo,
-                          requests.exceptions.RequestException,
-                          max_tries=8)
-    def get_url(url):
-        return requests.get(url)
-
-The decorator will also accept a tuple of exceptions for cases where
-you want the same backoff behavior for more than one exception type:
-
-    @backoff.on_exception(backoff.expo,
-                          (requests.exceptions.Timeout,
-                           requests.exceptions.ConnectionError),
-                          max_tries=8)
-    def get_url(url):
-        return requests.get(url)
-
-### @backoff.on_predicate
-
-The `on_predicate` decorator is used to retry when a particular
-condition is true of the return value of the target function.  This may
-be useful when polling a resource for externally generated content.
-
-Here's an example which uses a fibonacci sequence backoff when the
-return value of the target function is the empty list:
-
-    @backoff.on_predicate(backoff.fibo, lambda x: x == [], max_value=13)
-    def poll_for_messages(queue):
-        return queue.get()
-
-Extra keyword arguments are passed when initializing the
-wait generator, so the `max_value` param above is passed as a keyword
-arg when initializing the fibo generator.
-
-When not specified, the predicate param defaults to the falsey test,
-so the above can more concisely be written:
-
-    @backoff.on_predicate(backoff.fibo, max_value=13)
-    def poll_for_message(queue)
-        return queue.get()
-
-More simply, a function which continues polling every second until it
-gets a non-falsey result could be defined like like this:
-
-    @backoff.on_predicate(backoff.constant, interval=1)
-    def poll_for_message(queue)
-        return queue.get()
-
-### Using multiple decorators
-
-The backoff decorators may also be combined to specify different
-backoff behavior for different cases:
-
-    @backoff.on_predicate(backoff.fibo, max_value=13)
-    @backoff.on_exception(backoff.expo,
-                          requests.exceptions.HTTPError,
-                          max_tries=4)
-    @backoff.on_exception(backoff.expo,
-                          requests.exceptions.TimeoutError,
-                          max_tries=8)
-    def poll_for_message(queue):
-        return queue.get()
-
-### Event handlers
-
-Both backoff decorators optionally accept event handler functions
-using the keyword arguments `on_success`, `on_backoff`, and `on_giveup`.
-This may be useful in reporting statistics or performing other custom
-logging.
-
-Handlers must be callables with a unary signature accepting a dict
-argument. This dict contains the details of the invocation. Valid keys
-include:
-
-  * 'target' - reference to the function or method being invoked
-  * 'args' - positional arguments to func
-  * 'kwargs' - keyword arguments to func
-  * 'tries' - number of invocation tries so far
-  * 'wait' - seconds to wait (`on_backoff` handler only)
-  * 'value' - value triggering backoff (`on_predicate` decorator only)
-
-A handler which prints the details of the backoff event could be
-implemented like so:
-
-    def backoff_hdlr(details):
-        print ("Backing off {wait:0.1f} seconds afters {tries} tries "
-               "calling function {func} with args {args} and kwargs "
-               "{kwargs}".format(**details))
-
-    @backoff.on_exception(backoff.expo,
-                          requests.exceptions.RequestException,
-                          on_backoff=backoff_hdlr)
-    def get_url(url):
-        return requests.get(url)
-
-#### Multiple handlers per event type
-
-In all cases, iterables of handler functions are also accepted, which
-are called in turn.
-
-#### Getting exception info
-
-In the case of the `on_exception` decorator, all `on_backoff` and
-`on_giveup` handlers are called from within the except block for the
-exception being handled. Therefore exception info is available to the
-handler functions via the python standard library, specifically
-`sys.exc_info()` or the `traceback` module.
-
-### Logging configuration
-
-Errors and backoff and retry attempts are logged to the 'backoff'
-logger. By default, this logger is configured with a NullHandler, so
-there will be nothing output unless you configure a handler.
-Programmatically, this might be accomplished with something as simple
-as:
-
-    logging.getLogger('backoff').addHandler(logging.StreamHandler())
-
-The default logging level is ERROR, which corresponds to logging anytime
-`max_tries` is exceeded as well as any time a retryable exception is
-raised. If you would instead like to log any type of retry, you can
-set the logger level to INFO:
-
-    logging.getLogger('backoff').setLevel(logging.INFO)
+For examples and full documentation see the README at
+https://github.com/litl/backoff
 """
 from __future__ import unicode_literals
 
@@ -171,18 +37,19 @@ else:
 logger.setLevel(logging.ERROR)
 
 
-def expo(init_value=1, base=2, max_value=None):
+def expo(base=2, factor=1, max_value=None):
     """Generator for exponential decay.
 
     Args:
         base: The mathematical base of the exponentiation operation
+        factor: Factor to multiply the exponentation by.
         max_value: The maximum value to yield. Once the value in the
              true exponential sequence exceeds this, the value
              of max_value will forever after be yielded.
     """
     n = 0
     while True:
-        a = init_value * base ** n
+        a = factor * base ** n
         if max_value is None or a < max_value:
             yield a
             n += 1
@@ -219,15 +86,28 @@ def constant(interval=1):
 
 
 def random_jitter(value):
-    return value+random.random()
+    """Jitter the value a random number of milliseconds.
+
+    This adds up to 1 second of additional time to the original value.
+    Prior to backoff version 1.2 this was the default jitter behavior.
+
+    Args:
+        value: The unadulterated backoff value.
+    """
+    return value + random.random()
 
 
 def full_jitter(value):
+    """Jitter the value across the full range (0 to value).
+
+    This corresponds to the "Full Jitter" algorithm specified in the
+    AWS blog's post on the performance of various jitter algorithms.
+    (http://www.awsarchitectureblog.com/2015/03/backoff.html)
+
+    Args:
+        value: The unadulterated backoff value.
+    """
     return random.uniform(0, value)
-
-
-def equal_jitter(value):
-    return (value/2.0) + (random.uniform(0, value/2.0))
 
 
 def on_predicate(wait_gen,
@@ -251,17 +131,19 @@ def on_predicate(wait_gen,
             up. In the case of failure, the result of the last attempt
             will be returned.  The default value of None means their
             is no limit to the number of tries.
-        jitter: Callable returning an offset to the value yielded by wait_gen.
-            This staggers wait times a random number of milliseconds to help
-            spread out load in the case that there are multiple simultaneous
-            retries occuring.
+        jitter: A function of the value yielded by wait_gen returning
+            the actual time to wait. This distributes wait times
+            stochastically in order to avoid timing collisions across
+            concurrent clients. Wait times are jittered by default
+            using the full_jitter function. Jittering may be disabled
+            altogether by passing jitter=None.
         on_success: Callable (or iterable of callables) with a unary
             signature to be called in the event of success. The
             parameter is a dict containing details about the invocation.
         on_backoff: Callable (or iterable of callables) with a unary
             signature to be called in the event of a backoff. The
             parameter is a dict containing details about the invocation.
-        on_giveup: Callable (or iterable of callables) wutg a unary
+        on_giveup: Callable (or iterable of callables) with a unary
             signature to be called in the event that max_tries
             is exceeded.  The parameter is a dict containing details
             about the invocation.
@@ -349,17 +231,19 @@ def on_exception(wait_gen,
             up. Once exhausted, the exception will be allowed to escape.
             The default value of None means their is no limit to the
             number of tries.
-        jitter: Callable returning an offset to the value yielded by wait_gen.
-            This staggers wait times a random number of milliseconds to help
-            spread out load in the case that there are multiple simultaneous
-            retries occuring.
+        jitter: A function of the value yielded by wait_gen returning
+            the actual time to wait. This distributes wait times
+            stochastically in order to avoid timing collisions across
+            concurrent clients. Wait times are jittered by default
+            using the full_jitter function. Jittering may be disabled
+            altogether by passing jitter=None.
         on_success: Callable (or iterable of callables) with a unary
             signature to be called in the event of success. The
             parameter is a dict containing details about the invocation.
         on_backoff: Callable (or iterable of callables) with a unary
             signature to be called in the event of a backoff. The
             parameter is a dict containing details about the invocation.
-        on_giveup: Callable (or iterable of callables) wutg a unary
+        on_giveup: Callable (or iterable of callables) with a unary
             signature to be called in the event that max_tries
             is exceeded.  The parameter is a dict containing details
             about the invocation.
